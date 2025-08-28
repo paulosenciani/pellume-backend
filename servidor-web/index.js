@@ -1,103 +1,104 @@
 const express = require("express");
 const redis = require("redis");
 
-// --- CONFIGURAÇÃO ---
-const app = express();
-app.use(express.json());
+// =======================================================================
+// --- MODO DE INVESTIGAÇÃO ---
+// =======================================================================
 
-const PORT = process.env.PORT || 3000;
-const SECRET_KEY = process.env.SECRET_KEY;
-const REDIS_URL = process.env.REDIS_URL;
+async function startServer() {
+  // --- 1. CONFIGURAÇÕES ---
+  const app = express();
+  app.use(express.json());
 
-let redisClient;
-let isRedisConnected = false;
+  const PORT = process.env.PORT || 3000;
+  const SECRET_KEY = process.env.SECRET_KEY;
+  const REDIS_URL = process.env.REDIS_URL;
 
-// Função para iniciar e gerenciar a conexão com o Redis
-const connectToRedis = () => {
-  // Se já tivermos um cliente, desconectamos o antigo primeiro
-  if (redisClient) {
-    redisClient.quit();
-  }
+  let redisClient;
+  let redisConnectionError = null;
 
-  console.log("Tentando conectar ao Redis...");
-  redisClient = redis.createClient({ url: REDIS_URL });
-
-  redisClient.on('error', (err) => {
-    console.error('Erro no Cliente Redis:', err);
-    isRedisConnected = false;
-    // Tenta reconectar após um tempo se ocorrer um erro
-    setTimeout(connectToRedis, 5000); 
-  });
-
-  redisClient.on('connect', () => console.log('Conectando ao Redis...'));
-  redisClient.on('ready', () => {
-    isRedisConnected = true;
-    console.log("✅ Conexão com Redis estabelecida e pronta.");
-  });
-  redisClient.on('end', () => {
-    isRedisConnected = false;
-    console.warn("⚠️ Conexão com Redis encerrada. Tentando reconectar...");
-    setTimeout(connectToRedis, 5000);
-  });
-
-  // A conexão inicial é feita aqui
-  redisClient.connect().catch(err => {
-    console.error("Falha na tentativa inicial de conexão com o Redis:", err);
-  });
-};
-
-// --- ROTAS ---
-
-app.get("/health", (req, res) => {
-  if (isRedisConnected) {
-    res.status(200).json({ status: "healthy", redis: "connected" });
-  } else {
-    res.status(503).json({ status: "unhealthy", redis: "disconnected" });
-  }
-});
-
-app.post("/criar-conta", async (req, res) => {
-  const headerSecret = req.headers["x-api-key"];
-  if (headerSecret !== SECRET_KEY) {
-    return res.status(403).json({ message: "Chave de API inválida" });
-  }
-
-  if (!isRedisConnected) {
-    return res.status(503).json({ message: "Serviço temporariamente indisponível, reconectando ao banco de dados." });
-  }
-
-  const { email, nome } = req.body;
-  if (!email || !nome) {
-    return res.status(400).json({ message: "E-mail e nome são obrigatórios." });
-  }
-
-  try {
-    const tarefa = {
-      email: email.trim().toLowerCase(),
-      nome: nome.trim(),
-      timestamp: new Date().toISOString()
-    };
-    
-    // Tentamos publicar a tarefa
-    await redisClient.publish('fila-de-trabalho', JSON.stringify(tarefa));
-    
-    console.log(`[Publicado] Tarefa para ${tarefa.email} enviada para a fila.`);
-    return res.status(202).json({ message: "Solicitação recebida e em processamento." });
-
-  } catch (error) {
-    console.error("❌ Erro CRÍTICO ao publicar no Redis:", error);
-    // Se a publicação falhar, informamos o cliente e não derrubamos o servidor.
-    return res.status(500).json({ message: "Erro interno ao enfileirar a solicitação. Por favor, tente novamente." });
-  }
-});
-
-// --- INICIALIZAÇÃO DO SERVIDOR ---
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Servidor Web (Recepcionista) rodando na porta ${PORT}.`);
-  // Inicia o processo de conexão com o Redis DEPOIS que o servidor está no ar.
+  // --- 2. TENTATIVA DE CONEXÃO COM O REDIS ---
   if (REDIS_URL) {
-    connectToRedis();
+    console.log("🔌 [TESTE] Tentando conectar ao Redis...");
+    redisClient = redis.createClient({ url: REDIS_URL });
+    redisClient.on('error', (err) => {
+      console.error('❌ [TESTE] Erro no Cliente Redis:', err);
+      redisConnectionError = err.message;
+    });
+    try {
+      await redisClient.connect();
+      console.log("✅ [TESTE] Conexão com Redis estabelecida com sucesso.");
+    } catch (err) {
+      console.error("❌ [TESTE] Falha CATASTRÓFICA ao conectar no Redis:", err);
+      redisConnectionError = err.message;
+    }
   } else {
-    console.error("ERRO FATAL: A variável de ambiente REDIS_URL não foi encontrada.");
+    console.error("❌ [TESTE] ERRO FATAL: A variável de ambiente REDIS_URL não foi encontrada.");
+    redisConnectionError = "REDIS_URL não definida.";
   }
+
+  // --- 3. ROTAS DE DIAGNÓSTICO ---
+
+  // Teste 1: O servidor está vivo?
+  // Se esta rota funcionar, sabemos que o Express está OK.
+  app.get("/teste-servidor", (req, res) => {
+    console.log("✅ [TESTE] Rota /teste-servidor foi chamada com sucesso.");
+    res.status(200).json({
+      message: "SUCESSO: O servidor Express está no ar e respondendo."
+    });
+  });
+
+  // Teste 2: Como está a conexão com o Redis?
+  // Esta rota nos diz o estado da nossa dependência mais crítica.
+  app.get("/teste-redis", (req, res) => {
+    console.log("✅ [TESTE] Rota /teste-redis foi chamada.");
+    if (redisClient && redisClient.isOpen) {
+      res.status(200).json({
+        status: "Conectado",
+        message: "SUCESSO: A conexão com o Redis está ativa e saudável."
+      });
+    } else {
+      res.status(500).json({
+        status: "Desconectado",
+        message: "FALHA: Não foi possível estabelecer ou manter a conexão com o Redis.",
+        error: redisConnectionError
+      });
+    }
+  });
+
+  // Teste 3: A publicação no Redis está funcionando?
+  // Este é o teste final, que simula a ação da nossa rota de negócio.
+  app.post("/teste-publicacao", async (req, res) => {
+    console.log("✅ [TESTE] Rota /teste-publicacao foi chamada.");
+    if (!redisClient || !redisClient.isOpen) {
+      return res.status(500).json({ message: "FALHA: Não é possível publicar porque o Redis está desconectado." });
+    }
+    try {
+      const testePayload = { teste: "ola mundo", timestamp: new Date() };
+      await redisClient.publish('fila-de-teste', JSON.stringify(testePayload));
+      console.log("✅ [TESTE] Publicação no Redis realizada com sucesso.");
+      res.status(200).json({ message: "SUCESSO: A publicação na fila do Redis funcionou." });
+    } catch (error) {
+      console.error("❌ [TESTE] Erro ao tentar publicar no Redis:", error);
+      res.status(500).json({
+        message: "FALHA: A publicação no Redis falhou.",
+        error: error.message
+      });
+    }
+  });
+
+  // Rota de Health Check para a Railway (simples e direta)
+  app.get("/health", (req, res) => {
+    res.status(200).send("OK");
+  });
+
+  // --- 4. INICIALIZAÇÃO DO SERVIDOR ---
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Servidor de DIAGNÓSTICO rodando na porta ${PORT}.`);
+  });
+}
+
+startServer().catch(error => {
+  console.error("💥 Falha catastrófica ao iniciar o servidor de diagnóstico:", error);
+  process.exit(1);
 });
