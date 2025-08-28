@@ -80,6 +80,20 @@ async function enviarEmailBoasVindas(email, senha, nome) {
             <p><strong>Senha:</strong> ${senha}</p>
           </div>
           <a href="https://pellume.com/login" class="button">🔐 Fazer Login Agora</a>
+
+           <!-- SEÇÃO ADICIONADA -->
+          <div class="important-notes">
+            <p><strong>⚠️ Importante:</strong></p>
+            <ul>
+              <li>Se você recebeu este e-mail mais de uma vez, esta é a sua senha mais recente e válida.</li>
+              <li>Guarde esses dados em local seguro.</li>
+              <li>Não compartilhe sua senha com terceiros.</li>
+              <li>Em caso de dúvidas, entre em contato conosco.</li>
+            </ul>
+            <p>Aproveite seu Guia Definitivo e transforme sua rotina de skincare!</p>
+          </div>
+          <!-- FIM DA SEÇÃO ADICIONADA -->
+          
           <p>Atenciosamente,  
 <strong>Equipe Pellume</strong></p>
         </div>
