@@ -9,53 +9,61 @@ const PORT = process.env.PORT || 3000;
 const SECRET_KEY = process.env.SECRET_KEY;
 const REDIS_URL = process.env.REDIS_URL;
 
-if (!REDIS_URL || !SECRET_KEY) {
-  console.error("ERRO FATAL: As variáveis de ambiente REDIS_URL e SECRET_KEY são obrigatórias.");
-  process.exit(1);
-}
+let redisClient;
+let isRedisConnected = false;
 
-// --- CLIENTE REDIS ---
-const redisClient = redis.createClient({
-  url: REDIS_URL
-});
+// Função para iniciar e gerenciar a conexão com o Redis
+const connectToRedis = () => {
+  // Se já tivermos um cliente, desconectamos o antigo primeiro
+  if (redisClient) {
+    redisClient.quit();
+  }
 
-redisClient.on('error', (err) => console.error('Erro no Cliente Redis:', err));
+  console.log("Tentando conectar ao Redis...");
+  redisClient = redis.createClient({ url: REDIS_URL });
 
-// =======================================================================
-// *** A CORREÇÃO CRÍTICA ESTÁ AQUI ***
-// =======================================================================
-// Primeiro, conectamos ao Redis.
-redisClient.connect()
-  .then(() => {
-    console.log("✅ Conectado ao Redis com sucesso.");
-    
-    // SÓ DEPOIS de conectar, nós iniciamos o servidor web.
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 Servidor Web (Recepcionista) rodando na porta ${PORT} e pronto para receber Health Checks.`);
-    });
-  })
-  .catch(err => {
-    console.error("❌ Falha fatal ao conectar com o Redis. O servidor não será iniciado.", err);
-    process.exit(1);
+  redisClient.on('error', (err) => {
+    console.error('Erro no Cliente Redis:', err);
+    isRedisConnected = false;
+    // Tenta reconectar após um tempo se ocorrer um erro
+    setTimeout(connectToRedis, 5000); 
   });
 
+  redisClient.on('connect', () => console.log('Conectando ao Redis...'));
+  redisClient.on('ready', () => {
+    isRedisConnected = true;
+    console.log("✅ Conexão com Redis estabelecida e pronta.");
+  });
+  redisClient.on('end', () => {
+    isRedisConnected = false;
+    console.warn("⚠️ Conexão com Redis encerrada. Tentando reconectar...");
+    setTimeout(connectToRedis, 5000);
+  });
+
+  // A conexão inicial é feita aqui
+  redisClient.connect().catch(err => {
+    console.error("Falha na tentativa inicial de conexão com o Redis:", err);
+  });
+};
 
 // --- ROTAS ---
 
-// Rota de Health Check para a Railway
 app.get("/health", (req, res) => {
-  if (redisClient.isOpen) {
+  if (isRedisConnected) {
     res.status(200).json({ status: "healthy", redis: "connected" });
   } else {
     res.status(503).json({ status: "unhealthy", redis: "disconnected" });
   }
 });
 
-// Rota principal que recebe os dados e envia para a fila
 app.post("/criar-conta", async (req, res) => {
   const headerSecret = req.headers["x-api-key"];
   if (headerSecret !== SECRET_KEY) {
     return res.status(403).json({ message: "Chave de API inválida" });
+  }
+
+  if (!isRedisConnected) {
+    return res.status(503).json({ message: "Serviço temporariamente indisponível, reconectando ao banco de dados." });
   }
 
   const { email, nome } = req.body;
@@ -69,13 +77,27 @@ app.post("/criar-conta", async (req, res) => {
       nome: nome.trim(),
       timestamp: new Date().toISOString()
     };
-
+    
+    // Tentamos publicar a tarefa
     await redisClient.publish('fila-de-trabalho', JSON.stringify(tarefa));
+    
     console.log(`[Publicado] Tarefa para ${tarefa.email} enviada para a fila.`);
     return res.status(202).json({ message: "Solicitação recebida e em processamento." });
 
   } catch (error) {
-    console.error("❌ Erro ao publicar tarefa no Redis:", error);
-    return res.status(500).json({ message: "Erro interno ao processar a solicitação." });
+    console.error("❌ Erro CRÍTICO ao publicar no Redis:", error);
+    // Se a publicação falhar, informamos o cliente e não derrubamos o servidor.
+    return res.status(500).json({ message: "Erro interno ao enfileirar a solicitação. Por favor, tente novamente." });
+  }
+});
+
+// --- INICIALIZAÇÃO DO SERVIDOR ---
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Servidor Web (Recepcionista) rodando na porta ${PORT}.`);
+  // Inicia o processo de conexão com o Redis DEPOIS que o servidor está no ar.
+  if (REDIS_URL) {
+    connectToRedis();
+  } else {
+    console.error("ERRO FATAL: A variável de ambiente REDIS_URL não foi encontrada.");
   }
 });
