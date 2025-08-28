@@ -1,6 +1,6 @@
 const redis = require("redis");
 const admin = require("firebase-admin");
-const nodemailer = require("nodemailer");
+const sgMail = require('@sendgrid/mail'); // 1. Importa a biblioteca correta
 
 // =======================================================================
 // --- CONFIGURAÇÃO E INICIALIZAÇÃO DO TRABALHADOR ---
@@ -11,21 +11,17 @@ console.log("[Trabalhador] Iniciando...");
 // Carrega as variáveis de ambiente
 const REDIS_URL = process.env.REDIS_URL;
 const GOOGLE_CREDENTIALS_JSON = process.env.GOOGLE_CREDENTIALS_JSON;
-const EMAIL_CONFIG = {
-  host: process.env.SMTP_HOST,
-  port: process.env.SMTP_PORT,
-  secure: process.env.SMTP_PORT === '465',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-};
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY; // 2. Carrega a nova chave de API
+const FROM_EMAIL = "contato@pellume.com"; // 3. Defina seu e-mail verificado no SendGrid
 
 // Validação crítica das variáveis
-if (!REDIS_URL || !GOOGLE_CREDENTIALS_JSON || !EMAIL_CONFIG.auth.user) {
-  console.error("❌ ERRO FATAL: Variáveis de ambiente essenciais (REDIS_URL, GOOGLE_CREDENTIALS_JSON, etc.) não foram definidas.");
+if (!REDIS_URL || !GOOGLE_CREDENTIALS_JSON || !SENDGRID_API_KEY) {
+  console.error("❌ ERRO FATAL: Variáveis de ambiente essenciais (REDIS_URL, GOOGLE_CREDENTIALS_JSON, SENDGRID_API_KEY) não foram definidas.");
   process.exit(1);
 }
+
+// Configura o SendGrid
+sgMail.setApiKey(SENDGRID_API_KEY);
 
 // Inicializa o Firebase Admin SDK
 try {
@@ -45,7 +41,7 @@ const db = admin.firestore();
 // --- LÓGICA DE NEGÓCIO (O "TRABALHO PESADO") ---
 // =======================================================================
 
-// Função para gerar senha aleatória
+// Função para gerar senha aleatória (sem alterações)
 function gerarSenha() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let senha = '';
@@ -55,9 +51,8 @@ function gerarSenha() {
   return senha;
 }
 
-// Função para enviar e-mail de boas-vindas
+// 4. Função de e-mail REESCRITA para usar SendGrid
 async function enviarEmailBoasVindas(email, senha, nome) {
-  const transporter = nodemailer.createTransport(EMAIL_CONFIG);
   const htmlTemplate = `
     <!DOCTYPE html>
     <html>
@@ -91,16 +86,34 @@ async function enviarEmailBoasVindas(email, senha, nome) {
       </div>
     </body>
     </html>`;
-  const mailOptions = {
-    from: `"Equipe Pellume" <${process.env.EMAIL_USER}>`,
+
+  const msg = {
     to: email,
+    from: {
+      name: 'Equipe Pellume',
+      email: FROM_EMAIL,
+    },
     subject: '🎉 Bem-vinda! Seus dados de acesso à plataforma',
-    html: htmlTemplate
+    html: htmlTemplate,
   };
-  await transporter.sendMail(mailOptions );
+
+  try {
+    await sgMail.send(msg );
+    console.log(`✅ E-mail de boas-vindas enviado para ${email} via SendGrid.`);
+  } catch (error) {
+    console.error(`❌ Erro ao enviar e-mail via SendGrid para ${email}:`);
+    // O erro do SendGrid é rico em detalhes, então o registramos
+    if (error.response) {
+      console.error(error.response.body);
+    } else {
+      console.error(error);
+    }
+    // Lançamos o erro para que o catch principal saiba que o envio falhou
+    throw error;
+  }
 }
 
-// Função principal que processa a tarefa recebida do Redis
+// Função principal que processa a tarefa (sem alterações na lógica principal)
 async function processarCriacaoDeConta(tarefa) {
   const { email, nome } = tarefa;
   console.log(`[Processando] Iniciando tarefa para: ${email}`);
@@ -108,7 +121,6 @@ async function processarCriacaoDeConta(tarefa) {
     let userRecord;
     const senhaGerada = gerarSenha();
     
-    // Lógica de criar ou atualizar usuário no Firebase Auth
     try {
       userRecord = await admin.auth().getUserByEmail(email);
       await admin.auth().updateUser(userRecord.uid, { password: senhaGerada, displayName: nome });
@@ -118,21 +130,16 @@ async function processarCriacaoDeConta(tarefa) {
         userRecord = await admin.auth().createUser({ email, password: senhaGerada, displayName: nome });
         console.log(`[Processando] Novo usuário ${email} criado.`);
       } else {
-        throw error; // Lança outros erros do Auth para o catch principal
+        throw error;
       }
     }
     
-    // Salva no Firestore
     await db.collection("users").doc(userRecord.uid).set({ email, nome, dataCriacao: admin.firestore.FieldValue.serverTimestamp(), ativo: true }, { merge: true });
-    
-    // Envia o e-mail de boas-vindas
     await enviarEmailBoasVindas(email, senhaGerada, nome);
-    
     console.log(`✅ [Sucesso] Tarefa concluída para: ${email}`);
 
   } catch (error) {
-    console.error(`❌ [Erro] Falha ao processar tarefa para ${email}:`, error);
-    // No futuro, podemos adicionar uma lógica para reenviar a tarefa ou notificar um erro.
+    console.error(`❌ [Erro] Falha ao processar tarefa para ${email}:`, error.message);
   }
 }
 
@@ -146,13 +153,16 @@ async function iniciarTrabalhador() {
   
   try {
     await redisClient.connect();
+    // Usamos 'duplicate' para criar um cliente dedicado a 'subscribe'
+    // Isso é uma boa prática para evitar conflitos de comando no Redis
+    const subscriber = redisClient.duplicate();
+    await subscriber.connect();
+    
     console.log("✅ [Trabalhador] Conectado ao Redis e ouvindo a 'fila-de-trabalho'.");
 
-    // O trabalhador se inscreve no canal 'fila-de-trabalho'
-    await redisClient.subscribe('fila-de-trabalho', (message) => {
+    await subscriber.subscribe('fila-de-trabalho', (message) => {
       try {
         const tarefa = JSON.parse(message);
-        // Chama a função que contém toda a sua lógica de negócio
         processarCriacaoDeConta(tarefa);
       } catch (e) {
         console.error("Erro ao parsear mensagem da fila:", message, e);
