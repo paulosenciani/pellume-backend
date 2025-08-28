@@ -1,14 +1,14 @@
 {
   "name": "trabalhador-firebase",
   "version": "1.0.0",
-  "description": "Ouve a fila Redis e processa as tarefas de criação de usuário.",
+  "description": "Trabalhador de fundo que processa tarefas do Firebase e envia e-mails.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "firebase-admin": "^11.10.1",
-    "nodemailer": "^6.9.4",
-    "redis": "^4.6.7"
+    "redis": "^4.6.7",
+    "@sendgrid/mail": "^7.7.0"
   }
 }
